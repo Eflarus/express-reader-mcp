@@ -2,6 +2,8 @@
 
 Read-only MCP server that reads **your own** eXpress desktop chats from the running app. Built for a public-server account, for which the CTS-only community MCPs do not work.
 
+> ⚠️ **Unofficial.** This is an independent, community project. It is **not** affiliated with, endorsed by, or supported by eXpress, its developer, or any official eXpress development team. It relies on undocumented internals of the desktop app, may break at any time, and is used entirely at your own risk. Only for reading **your own** account.
+
 ## How it works
 
 The eXpress desktop app is Electron. On demand, the server sends `SIGUSR1` to the running app, which opens Node's inspector on `127.0.0.1:9229` (loopback only). Through it the server reads the app's in-memory Redux store, which holds your chats **already decrypted** by the app itself. No new device is registered; no account keys leave the app.
