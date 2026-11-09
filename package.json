@@ -1,0 +1,11 @@
+{
+  "name": "express-reader-mcp",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Read-only MCP server that reads the signed-in user's own eXpress desktop chats via the app's debug inspector.",
+  "bin": { "express-reader-mcp": "src/server.mjs" },
+  "engines": { "node": ">=22" },
+  "dependencies": { "@modelcontextprotocol/sdk": "^1.19.0" },
+  "license": "MIT"
+}
