@@ -140,6 +140,47 @@ export async function openLink({ url, context = 5 }) {
   return evalRenderer(code);
 }
 
+// List the threads that belong to a chat (thread ids + reply counts). Side-effect-free.
+export async function listThreads({ chatId }) {
+  await boot();
+  return evalRenderer(`(() => { const st = window.__exr.store.getState(); const cid = ${JSON.stringify(chatId)};
+    const tl = st.threads.threadList || {};
+    return Object.entries(tl).filter(([id, t]) => t.parentChatId === cid)
+      .map(([id, t]) => ({ threadId: id, replies: t.counter, subscribers: (t.subscribers || []).length })); })()`);
+}
+
+// Read a thread's replies. SIDE EFFECT: opens the parent chat (marks it read) and navigates into the thread view.
+export async function readThread({ chatId, threadId, limit = 200 }) {
+  await boot();
+  const code = `(async () => {
+    const S = window.__exr.store; const chatId = ${JSON.stringify(chatId)}; const threadId = ${JSON.stringify(threadId)};
+    const prev = S.getState().chatRouting?.activeChatId;
+    S.dispatch({ type: '@@router/CALL_HISTORY_METHOD', payload: { method: 'push', args: ['/chats/' + chatId] } });
+    for (let i = 0; i < 12; i++) { await new Promise(r => setTimeout(r, 500)); if (S.getState().messages[0]?.groupChatId === chatId) break; }
+    // Find the mounted ChatContainer to reach navigateToThread.
+    const grab = () => { const roots = [document.getElementById('root'), ...document.body.children].filter(Boolean); let fiber = null;
+      for (const el of roots) { const k = Object.keys(el).find(k => k.startsWith('__reactContainer') || k.startsWith('__reactFiber')); if (k) { fiber = el[k]; break; } }
+      while (fiber && fiber.return) fiber = fiber.return; let cc = null; const stk = [fiber]; let n = 0;
+      while (stk.length && n < 200000 && !cc) { const f = stk.pop(); if (!f) continue; n++; const p = f.memoizedProps; const nm = typeof f.type === 'function' ? (f.type.displayName || f.type.name) : null;
+        if (nm === 'ChatContainer' && p && typeof p.navigateToThread === 'function') cc = p; if (f.child) stk.push(f.child); if (f.sibling) stk.push(f.sibling); } return cc; };
+    const cc = grab();
+    if (!cc) { if (prev) S.dispatch({ type: '@@router/CALL_HISTORY_METHOD', payload: { method: 'push', args: ['/chats/' + prev] } }); return { error: 'Could not open thread (chat view not mounted). Try again.' }; }
+    // Two-step: bare id initializes the thread view, the object form loads its history.
+    try { cc.navigateToThread(threadId); } catch {}
+    await new Promise(r => setTimeout(r, 800));
+    cc.navigateToThread({ threadId, parentChatId: chatId, chatId });
+    const want = (S.getState().threads.threadList?.[threadId]?.counter) || 1;
+    let tms = [];
+    for (let i = 0; i < 18; i++) { await new Promise(r => setTimeout(r, 500)); tms = S.getState().messages.filter(m => m.groupChatId === threadId); if (tms.length >= want) break; }
+    const st = S.getState();
+    ${MSG_HELPERS}
+    const me = st.user?.huid; const nameOf = h => st.profiles[h]?.rtsProfile?.name || null;
+    const out = tms.filter(m => m.eventType === 'message_new' && !m.deletedAt).sort((a, b) => a.insertedAt - b.insertedAt).slice(-${Number(limit)}).map(m => mapMsg(m, me, nameOf));
+    if (prev) S.dispatch({ type: '@@router/CALL_HISTORY_METHOD', payload: { method: 'push', args: ['/chats/' + prev] } });
+    return { chat: st.chats.find(c => c.groupChatId === chatId)?.name, threadId, count: out.length, messages: out }; })()`;
+  return evalRenderer(code);
+}
+
 // Extract an image message's already-decrypted preview thumbnail (base64). SIDE EFFECT: opens the chat if not active.
 export async function getImagePreview({ chatId, syncId }) {
   await boot();

@@ -55,6 +55,21 @@ const tools = [
     },
   },
   {
+    name: "express_list_threads",
+    description: "List the threads belonging to a chat (threadId + reply count). Side-effect-free. Use the returned threadId with express_read_thread.",
+    inputSchema: { type: "object", properties: { chatId: { type: "string" } }, required: ["chatId"], additionalProperties: false },
+  },
+  {
+    name: "express_read_thread",
+    description: "Read a thread's replies by chatId + threadId (from express_list_threads). Messages include attachment metadata. WARNING: opens the parent chat (MARKS IT READ) and navigates into the thread.",
+    inputSchema: {
+      type: "object",
+      properties: { chatId: { type: "string" }, threadId: { type: "string" }, limit: { type: "number" } },
+      required: ["chatId", "threadId"],
+      additionalProperties: false,
+    },
+  },
+  {
     name: "express_get_image",
     description: "Fetch an image message's decrypted preview thumbnail and save it to a local file (returns the path, which you can then read/view). Needs the chatId and the message syncId (from express_read_chat / express_open_link output). Only images have previews; this is a thumbnail, not full resolution. SIDE EFFECT: opens the chat if not already active (marks read).",
     inputSchema: {
@@ -84,6 +99,8 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
     if (name === "express_status") result = await x.status();
     else if (name === "express_list_chats") result = await x.listChats(a);
     else if (name === "express_open_link") result = await x.openLink({ url: a.url, context: a.context ?? 5 });
+    else if (name === "express_list_threads") result = await x.listThreads({ chatId: a.chatId });
+    else if (name === "express_read_thread") result = await x.readThread({ chatId: a.chatId, threadId: a.threadId, limit: a.limit ?? 200 });
     else if (name === "express_get_image") result = await x.getImagePreview({ chatId: a.chatId, syncId: a.syncId });
     else if (name === "express_close_debug") result = await x.closeDebug();
     else if (name === "express_read_chat") {

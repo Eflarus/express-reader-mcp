@@ -14,6 +14,8 @@ The eXpress desktop app is Electron. On demand, the server sends `SIGUSR1` to th
 - `express_list_chats` — chat list with metadata; filter by `query`/`unreadOnly`. **Silent.**
 - `express_read_chat` — resolve a person by `name` (or exact `chatId`), open the chat, return recent messages over `sinceDays`. Each message carries `syncId`, `attachment` metadata (kind/fileName/size/mime/fileId/hasImagePreview), and `hasThread`/`isReply` flags. **Marks the chat read and may send the sender a read receipt.** `coversWholeRange: false` means older messages in the range were not loaded (no history-scroll yet).
 - `express_open_link` — open an `xlnk.ms/open/message?sync_id=&chat_id=` deep link and return the referenced message + surrounding context. **Opens (marks read) the linked chat.**
+- `express_list_threads` — list a chat's threads (threadId + reply count). Side-effect-free.
+- `express_read_thread` — read a thread's replies by `chatId`+`threadId`. **Opens the parent chat (marks read).**
 - `express_get_image` — save an image message's decrypted **preview thumbnail** to a local file (by `chatId`+`syncId`) for viewing. Thumbnail only, not full resolution.
 - `express_close_debug` — quit + relaunch eXpress to unbind the debug port when finished.
 
@@ -27,6 +29,6 @@ The eXpress desktop app is Electron. On demand, the server sends `SIGUSR1` to th
 
 - History is whatever the app loads on open (often ~a week). Reaching further back needs chat-FSM scroll work (`scrollChatBackward`) — not yet implemented.
 - **Attachments: metadata for all file types; viewing is the image preview thumbnail only.** Full-resolution images and document *contents* (PDF/DOCX/JSON bytes) are NOT downloaded yet — `loadMessageFile` did not yield decrypted output in testing; needs more work (or standalone stream-decrypt like the audited express-mcp).
-- **Threads:** messages are flagged with `hasThread`, but reading a thread's replies is not implemented yet (thread messages load on a separate route).
+- **Threads:** supported via `express_list_threads` / `express_read_thread`.
 - Silent reading of a non-open chat (without marking read) was not wired; the reliable path opens the chat. Candidate for later: `startSearchMessages`.
 - Tied to the app's internal store/route shapes (observed on app v3.73.51); an app update may require adjustment.
