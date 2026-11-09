@@ -13,6 +13,7 @@ The eXpress desktop app is Electron. On demand, the server sends `SIGUSR1` to th
 - `express_status` — signed-in user, chat/unread counts, which chat is open. **Silent.**
 - `express_list_chats` — chat list with metadata; filter by `query`/`unreadOnly`. **Silent.**
 - `express_read_chat` — resolve a person by `name` (or exact `chatId`), open the chat, return messages over `sinceDays`. **Pages back through the app's history scroll to cover ranges well beyond the initial ~1 week.** Each message carries `syncId`, `attachment` metadata (kind/fileName/size/mime/fileId/hasImagePreview), and `hasThread`/`isReply` flags. **Marks the chat read and may send the sender a read receipt.** `coversWholeRange` tells you if the full range was reached; `historyExhausted` means there are no older messages.
+- `express_search_messages` — native server-side search within a chat (resolve by `name` or `chatId`): finds matches across the **whole history**, fast, not just loaded messages. Returns matching messages (syncId/time/from/text + attachment metadata); optional `sinceDays`. **Opens the chat (marks read).**
 - `express_open_link` — open an `xlnk.ms/open/message?sync_id=&chat_id=` deep link and return the referenced message + surrounding context. **Opens (marks read) the linked chat.**
 - `express_list_threads` — list a chat's threads (threadId + reply count). Side-effect-free.
 - `express_read_thread` — read a thread's replies by `chatId`+`threadId`. **Opens the parent chat (marks read).**

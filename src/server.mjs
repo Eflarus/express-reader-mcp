@@ -43,6 +43,22 @@ const tools = [
     },
   },
   {
+    name: "express_search_messages",
+    description: "Native server-side search within a chat — finds matches across the WHOLE history (not just loaded messages), fast. Resolve the chat by `name` or exact `chatId`; if `name` matches several, the matches are returned instead of searching. Returns matching messages (syncId/time/from/text + attachment metadata). Optionally filter with `sinceDays`. `truncated: true` means the app capped results (~100). WARNING: opens the chat (MARKS IT READ).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        name: { type: "string", description: "Person/chat name to resolve" },
+        chatId: { type: "string", description: "Exact chat id (overrides name)" },
+        query: { type: "string", description: "Search text" },
+        sinceDays: { type: "number", description: "Only matches within the last N days (default: all history)" },
+        limit: { type: "number", description: "Max results returned (default 100)" },
+      },
+      required: ["query"],
+      additionalProperties: false,
+    },
+  },
+  {
     name: "express_open_link",
     description: "Open an eXpress deep link (e.g. https://xlnk.ms/open/message?sync_id=...&chat_id=...) and return the referenced message plus surrounding context. Each message includes attachment metadata and flags (hasThread, isReply). WARNING: opens the linked chat, which MARKS IT READ.",
     inputSchema: {
@@ -113,6 +129,17 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
     let result;
     if (name === "express_status") result = await x.status();
     else if (name === "express_list_chats") result = await x.listChats(a);
+    else if (name === "express_search_messages") {
+      let chatId = a.chatId;
+      if (!chatId) {
+        if (!a.name) throw new Error("Provide `name` or `chatId`.");
+        const people = await x.resolvePeople(a.name);
+        if (people.length === 0) throw new Error(`No chat matches "${a.name}".`);
+        if (people.length > 1) return { content: [{ type: "text", text: `Multiple matches for "${a.name}" — call again with an exact chatId:\n${JSON.stringify(people, null, 1)}` }] };
+        chatId = people[0].id;
+      }
+      result = await x.searchMessages({ chatId, query: a.query, sinceDays: a.sinceDays ?? 0, limit: a.limit ?? 100 });
+    }
     else if (name === "express_open_link") result = await x.openLink({ url: a.url, context: a.context ?? 5 });
     else if (name === "express_list_threads") result = await x.listThreads({ chatId: a.chatId });
     else if (name === "express_read_thread") result = await x.readThread({ chatId: a.chatId, threadId: a.threadId, limit: a.limit ?? 200 });

@@ -87,6 +87,52 @@ const MSG_HELPERS = `
     from: m.sender === me ? 'me' : (nameOf(m.sender) || '?'), text: msgText(m) }; if (a) r.attachment = a; if (m.meta && m.meta.threadStarted) r.hasThread = true;
     if (m.payload && m.payload.reply) r.isReply = true; return r; };`;
 
+// Native server-side search within a chat (drives the app's in-chat search UI). Searches ALL history,
+// not just loaded messages. SIDE EFFECT: opens the chat (marks it read).
+export async function searchMessages({ chatId, query, sinceDays = 0, limit = 100 }) {
+  await boot();
+  const code = `(async () => {
+    const S = window.__exr.store; const id = ${JSON.stringify(chatId)}; const q = ${JSON.stringify(String(query))};
+    const prev = S.getState().chatRouting?.activeChatId;
+    S.dispatch({ type: '@@router/CALL_HISTORY_METHOD', payload: { method: 'push', args: ['/chats/' + id] } });
+    for (let i = 0; i < 14; i++) { await new Promise(r => setTimeout(r, 500)); if (S.getState().messages[0]?.groupChatId === id) break; }
+    const restore = () => { if (prev && prev !== id) S.dispatch({ type: '@@router/CALL_HISTORY_METHOD', payload: { method: 'push', args: ['/chats/' + prev] } }); };
+    const roots = [document.getElementById('root'), ...document.body.children].filter(Boolean);
+    const grab = (name, prop) => { let f = null; for (const el of roots) { const k = Object.keys(el).find(k => k.startsWith('__reactContainer') || k.startsWith('__reactFiber')); if (k) { f = el[k]; break; } }
+      while (f && f.return) f = f.return; let hit = null; const stk = [f]; let n = 0;
+      while (stk.length && n < 200000 && !hit) { const x = stk.pop(); if (!x) continue; n++; const p = x.memoizedProps; const nm = typeof x.type === 'function' ? (x.type.displayName || x.type.name) : null;
+        if (nm === name && p && typeof p[prop] === 'function') hit = p; if (x.child) stk.push(x.child); if (x.sibling) stk.push(x.sibling); } return hit; };
+    const header = grab('ChatHeader', 'onToggleSearchChatHistory');
+    if (!header) { restore(); return { error: 'Search unavailable (chat header not mounted). Try again.' }; }
+    // Toggle until the search input is visible (robust to the box already being open/closed).
+    let si = null;
+    for (let t = 0; t < 4 && !si; t++) {
+      const inputs = [...document.querySelectorAll('input')].filter(el => el.offsetParent !== null);
+      si = inputs.find(el => /поиск|search|найти/i.test((el.placeholder || '') + (el.getAttribute('aria-label') || '')));
+      if (si) break;
+      try { header.onToggleSearchChatHistory(true); } catch (e) {}
+      await new Promise(r => setTimeout(r, 700));
+    }
+    if (!si) { restore(); return { error: 'Search input not found.' }; }
+    const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+    setter.call(si, q); si.dispatchEvent(new Event('input', { bubbles: true }));
+    si.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));
+    si.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', keyCode: 13, bubbles: true }));
+    // Wait for results to arrive and stabilize.
+    let arr = [], stable = 0, last = -1;
+    for (let i = 0; i < 24; i++) { await new Promise(r => setTimeout(r, 500)); arr = S.getState().searchMessages[id] || []; if (arr.length === last) { if (++stable >= 3) break; } else { stable = 0; last = arr.length; } }
+    ${MSG_HELPERS}
+    const st = S.getState(); const me = st.user?.huid; const nameOf = h => st.profiles[h]?.rtsProfile?.name || null;
+    const since = ${Number(sinceDays)} > 0 ? Date.now() - ${Number(sinceDays)} * ${DAY_MS} : 0;
+    let matches = arr.filter(m => m.eventType === 'message_new' && !m.deletedAt && (!since || m.insertedAt >= since));
+    matches.sort((a, b) => a.insertedAt - b.insertedAt);
+    const out = matches.slice(-${Number(limit)}).map(m => mapMsg(m, me, nameOf));
+    try { header.onToggleSearchChatHistory(false); } catch (e) {}
+    restore();
+    return { chat: st.chats.find(c => c.groupChatId === id)?.name, query: q, matched: matches.length, count: out.length, truncated: matches.length > out.length, messages: out }; })()`;
+  return evalRenderer(code);
+}
+
 // Open a chat and read its recent messages (incl. attachment metadata). Scrolls back to cover `sinceDays`
 // (beyond the ~1 week initial load) by paging the app's infinite-scroll. SIDE EFFECT: marks the chat read.
 export async function readChat({ chatId, sinceDays = 7, fromOpponentOnly = false, limit = 200, maxScrolls = 40 }) {
