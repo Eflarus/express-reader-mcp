@@ -1,13 +1,13 @@
-#!/usr/bin/env node
 // Read-only MCP server for the eXpress desktop app. Reads the signed-in user's own
 // chats from the running app on demand. No sending. See README for the security model.
 
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
-import * as x from "./express.mjs";
+import type { CallToolResult, Tool } from "@modelcontextprotocol/sdk/types.js";
+import * as x from "./express.js";
 
-const tools = [
+const tools: Tool[] = [
   {
     name: "express_status",
     description: "Check the running eXpress app: signed-in user, chat count, unread count, which chat is open. Side-effect-free (no read receipts).",
@@ -91,10 +91,7 @@ const tools = [
     description: "Fetch an image message's decrypted preview thumbnail and save it to a local file (returns the path, which you can then read/view). Needs the chatId and the message syncId (from express_read_chat / express_open_link output). Only images have previews; this is a thumbnail, not full resolution. SIDE EFFECT: opens the chat if not already active (marks read).",
     inputSchema: {
       type: "object",
-      properties: {
-        chatId: { type: "string" },
-        syncId: { type: "string" },
-      },
+      properties: { chatId: { type: "string" }, syncId: { type: "string" } },
       required: ["chatId", "syncId"],
       additionalProperties: false,
     },
@@ -120,48 +117,116 @@ const tools = [
   },
 ];
 
-const server = new Server({ name: "express-reader", version: "0.1.0" }, { capabilities: { tools: {} } });
+const server = new Server({ name: "express-reader", version: "0.2.0" }, { capabilities: { tools: {} } });
+
 server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools }));
 
-server.setRequestHandler(CallToolRequestSchema, async (req) => {
-  const { name, arguments: a = {} } = req.params;
-  try {
-    let result;
-    if (name === "express_status") result = await x.status();
-    else if (name === "express_list_chats") result = await x.listChats(a);
-    else if (name === "express_search_messages") {
-      let chatId = a.chatId;
-      if (!chatId) {
-        if (!a.name) throw new Error("Provide `name` or `chatId`.");
-        const people = await x.resolvePeople(a.name);
-        if (people.length === 0) throw new Error(`No chat matches "${a.name}".`);
-        if (people.length > 1) return { content: [{ type: "text", text: `Multiple matches for "${a.name}" — call again with an exact chatId:\n${JSON.stringify(people, null, 1)}` }] };
-        chatId = people[0].id;
-      }
-      result = await x.searchMessages({ chatId, query: a.query, sinceDays: a.sinceDays ?? 0, limit: a.limit ?? 100 });
+function textResult(payload: unknown): CallToolResult {
+  return { content: [{ type: "text", text: typeof payload === "string" ? payload : JSON.stringify(payload, null, 1) }] };
+}
+
+server.setRequestHandler(CallToolRequestSchema, async (req): Promise<CallToolResult> => {
+  const name = req.params.name;
+  const args: Record<string, unknown> = req.params.arguments ?? {};
+  const str = (k: string): string | undefined => (typeof args[k] === "string" ? (args[k] as string) : undefined);
+  const num = (k: string): number | undefined => (typeof args[k] === "number" ? (args[k] as number) : undefined);
+  const bool = (k: string): boolean | undefined => (typeof args[k] === "boolean" ? (args[k] as boolean) : undefined);
+
+  // Resolve a chat either from an explicit chatId or by resolving `name`.
+  // Returns { chatId } to proceed, or { reply } when disambiguation is needed.
+  const resolveChat = async (): Promise<{ chatId: string } | { reply: CallToolResult }> => {
+    const explicit = str("chatId");
+    if (explicit) return { chatId: explicit };
+    const nm = str("name");
+    if (!nm) throw new Error("Provide `name` or `chatId`.");
+    const people = await x.resolvePeople(nm);
+    const first = people[0];
+    if (!first) throw new Error(`No chat matches "${nm}".`);
+    if (people.length > 1) {
+      return { reply: textResult(`Multiple matches for "${nm}" — call again with an exact chatId:\n${JSON.stringify(people, null, 1)}`) };
     }
-    else if (name === "express_open_link") result = await x.openLink({ url: a.url, context: a.context ?? 5 });
-    else if (name === "express_list_threads") result = await x.listThreads({ chatId: a.chatId });
-    else if (name === "express_read_thread") result = await x.readThread({ chatId: a.chatId, threadId: a.threadId, limit: a.limit ?? 200 });
-    else if (name === "express_get_image") result = await x.getImagePreview({ chatId: a.chatId, syncId: a.syncId });
-    else if (name === "express_download_file") result = await x.downloadFile({ chatId: a.chatId, syncId: a.syncId, folder: a.folder });
-    else if (name === "express_close_debug") result = await x.closeDebug();
-    else if (name === "express_read_chat") {
-      let chatId = a.chatId;
-      if (!chatId) {
-        if (!a.name) throw new Error("Provide `name` or `chatId`.");
-        const people = await x.resolvePeople(a.name);
-        if (people.length === 0) throw new Error(`No chat matches "${a.name}".`);
-        if (people.length > 1) {
-          return { content: [{ type: "text", text: `Multiple matches for "${a.name}" — call again with an exact chatId:\n${JSON.stringify(people, null, 1)}` }] };
-        }
-        chatId = people[0].id;
+    return { chatId: first.id };
+  };
+
+  try {
+    switch (name) {
+      case "express_status":
+        return textResult(await x.status());
+
+      case "express_list_chats":
+        return textResult(await x.listChats({
+          query: str("query") ?? "",
+          unreadOnly: bool("unreadOnly") ?? false,
+          limit: num("limit") ?? 40,
+        }));
+
+      case "express_read_chat": {
+        const r = await resolveChat();
+        if ("reply" in r) return r.reply;
+        return textResult(await x.readChat({
+          chatId: r.chatId,
+          sinceDays: num("sinceDays") ?? 7,
+          fromOpponentOnly: bool("fromOpponentOnly") ?? false,
+          limit: num("limit") ?? 200,
+          maxScrolls: num("maxScrolls") ?? 40,
+        }));
       }
-      result = await x.readChat({ chatId, sinceDays: a.sinceDays ?? 7, fromOpponentOnly: a.fromOpponentOnly ?? false, limit: a.limit ?? 200, maxScrolls: a.maxScrolls ?? 40 });
-    } else throw new Error(`Unknown tool: ${name}`);
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 1) }] };
+
+      case "express_search_messages": {
+        const query = str("query");
+        if (!query) throw new Error("`query` is required.");
+        const r = await resolveChat();
+        if ("reply" in r) return r.reply;
+        return textResult(await x.searchMessages({
+          chatId: r.chatId,
+          query,
+          sinceDays: num("sinceDays") ?? 0,
+          limit: num("limit") ?? 100,
+        }));
+      }
+
+      case "express_open_link": {
+        const url = str("url");
+        if (!url) throw new Error("`url` is required.");
+        return textResult(await x.openLink({ url, context: num("context") ?? 5 }));
+      }
+
+      case "express_list_threads": {
+        const chatId = str("chatId");
+        if (!chatId) throw new Error("`chatId` is required.");
+        return textResult(await x.listThreads({ chatId }));
+      }
+
+      case "express_read_thread": {
+        const chatId = str("chatId");
+        const threadId = str("threadId");
+        if (!chatId || !threadId) throw new Error("`chatId` and `threadId` are required.");
+        return textResult(await x.readThread({ chatId, threadId, limit: num("limit") ?? 200 }));
+      }
+
+      case "express_get_image": {
+        const chatId = str("chatId");
+        const syncId = str("syncId");
+        if (!chatId || !syncId) throw new Error("`chatId` and `syncId` are required.");
+        return textResult(await x.getImagePreview({ chatId, syncId }));
+      }
+
+      case "express_download_file": {
+        const chatId = str("chatId");
+        const syncId = str("syncId");
+        if (!chatId || !syncId) throw new Error("`chatId` and `syncId` are required.");
+        const folder = str("folder");
+        return textResult(await x.downloadFile(folder !== undefined ? { chatId, syncId, folder } : { chatId, syncId }));
+      }
+
+      case "express_close_debug":
+        return textResult(await x.closeDebug());
+
+      default:
+        throw new Error(`Unknown tool: ${name}`);
+    }
   } catch (err) {
-    return { content: [{ type: "text", text: `Error: ${err.message}` }], isError: true };
+    return { content: [{ type: "text", text: `Error: ${err instanceof Error ? err.message : String(err)}` }], isError: true };
   }
 });
 

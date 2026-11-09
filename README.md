@@ -8,6 +8,21 @@ Read-only MCP server that reads **your own** eXpress desktop chats from the runn
 
 The eXpress desktop app is Electron. On demand, the server sends `SIGUSR1` to the running app, which opens Node's inspector on `127.0.0.1:9229` (loopback only). Through it the server reads the app's in-memory Redux store, which holds your chats **already decrypted** by the app itself. No new device is registered; no account keys leave the app.
 
+## Install
+
+TypeScript (strict), compiled to `dist/`. Requires Node ≥ 22.
+
+```sh
+npm install
+npm run build
+```
+
+Register with your MCP client, pointing at the built entry point, e.g. for Claude Code:
+
+```sh
+claude mcp add --scope user express-reader -- "$(which node)" "$PWD/dist/server.js"
+```
+
 ## Tools
 
 - `express_status` — signed-in user, chat/unread counts, which chat is open. **Silent.**
