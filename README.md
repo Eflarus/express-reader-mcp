@@ -12,11 +12,12 @@ The eXpress desktop app is Electron. On demand, the server sends `SIGUSR1` to th
 
 - `express_status` — signed-in user, chat/unread counts, which chat is open. **Silent.**
 - `express_list_chats` — chat list with metadata; filter by `query`/`unreadOnly`. **Silent.**
-- `express_read_chat` — resolve a person by `name` (or exact `chatId`), open the chat, return recent messages over `sinceDays`. Each message carries `syncId`, `attachment` metadata (kind/fileName/size/mime/fileId/hasImagePreview), and `hasThread`/`isReply` flags. **Marks the chat read and may send the sender a read receipt.** `coversWholeRange: false` means older messages in the range were not loaded (no history-scroll yet).
+- `express_read_chat` — resolve a person by `name` (or exact `chatId`), open the chat, return messages over `sinceDays`. **Pages back through the app's history scroll to cover ranges well beyond the initial ~1 week.** Each message carries `syncId`, `attachment` metadata (kind/fileName/size/mime/fileId/hasImagePreview), and `hasThread`/`isReply` flags. **Marks the chat read and may send the sender a read receipt.** `coversWholeRange` tells you if the full range was reached; `historyExhausted` means there are no older messages.
 - `express_open_link` — open an `xlnk.ms/open/message?sync_id=&chat_id=` deep link and return the referenced message + surrounding context. **Opens (marks read) the linked chat.**
 - `express_list_threads` — list a chat's threads (threadId + reply count). Side-effect-free.
 - `express_read_thread` — read a thread's replies by `chatId`+`threadId`. **Opens the parent chat (marks read).**
-- `express_get_image` — save an image message's decrypted **preview thumbnail** to a local file (by `chatId`+`syncId`) for viewing. Thumbnail only, not full resolution.
+- `express_get_image` — save an image message's decrypted **preview thumbnail** to a local file (by `chatId`+`syncId`) for quick viewing. Thumbnail only; use `express_download_file` for the full-resolution image.
+- `express_download_file` — download a document/image attachment at full fidelity. The **app** decrypts it to an in-memory blob; the file is saved to a local folder (default `~/Downloads/express-reader`, configurable via `folder` or `EXPRESS_DOWNLOAD_DIR`) and the path is returned so you can read it as a normal file. Keys never leave the app. Max 25 MiB. **Opens the chat (marks read).**
 - `express_close_debug` — quit + relaunch eXpress to unbind the debug port when finished.
 
 ## Security model
@@ -25,10 +26,13 @@ The eXpress desktop app is Electron. On demand, the server sends `SIGUSR1` to th
 - Read-only: there is no send capability.
 - Requires the app to be running and signed in. Node ≥ 22 (global `WebSocket`/`fetch`).
 
-## Limits / TODO
+## How downloads stay safe
 
-- History is whatever the app loads on open (often ~a week). Reaching further back needs chat-FSM scroll work (`scrollChatBackward`) — not yet implemented.
-- **Attachments: metadata for all file types; viewing is the image preview thumbnail only.** Full-resolution images and document *contents* (PDF/DOCX/JSON bytes) are NOT downloaded yet — `loadMessageFile` did not yield decrypted output in testing; needs more work (or standalone stream-decrypt like the audited express-mcp).
-- **Threads:** supported via `express_list_threads` / `express_read_thread`.
-- Silent reading of a non-open chat (without marking read) was not wired; the reliable path opens the chat. Candidate for later: `startSearchMessages`.
+`express_download_file` never touches your encryption keys. It calls the app's own `loadAttachment`, which decrypts the file in-app to an in-memory blob; the tool only fetches that already-decrypted blob (the same way it reads a decrypted message) and writes it to disk. The key material stays inside the app at all times.
+
+## Limits / notes
+
+- Reading a non-open chat still **marks it read** (the reliable path opens the chat); fully silent reading is not wired.
+- History paging walks the app's virtualized scroll; very long ranges take a few seconds per ~50-message page (`maxScrolls` caps it).
+- Downloads cap at 25 MiB.
 - Tied to the app's internal store/route shapes (observed on app v3.73.51); an app update may require adjustment.

@@ -28,7 +28,7 @@ const tools = [
   },
   {
     name: "express_read_chat",
-    description: "Open a chat and return its recent messages (decrypted), filtered to the last `sinceDays` days. Resolve the person by `name` OR pass an exact `chatId`. If `name` matches several chats, the matches are returned instead of reading. WARNING: opening a chat MARKS IT READ and may send the sender a read receipt. If `coversWholeRange` is false, older messages in the range were not loaded.",
+    description: "Open a chat and return its decrypted messages over the last `sinceDays` days. Pages back through the app's history scroll to cover ranges beyond the initial ~1 week. Resolve the person by `name` OR pass an exact `chatId`; if `name` matches several chats, the matches are returned instead of reading. WARNING: opening a chat MARKS IT READ and may send the sender a read receipt. `coversWholeRange: false` means the range wasn't fully reached within `maxScrolls`; `historyExhausted` means there are no older messages.",
     inputSchema: {
       type: "object",
       properties: {
@@ -37,6 +37,7 @@ const tools = [
         sinceDays: { type: "number", description: "How many days back (default 7)" },
         fromOpponentOnly: { type: "boolean", description: "Only the other person's messages, excluding your own (default false)" },
         limit: { type: "number", description: "Max messages returned (default 200)" },
+        maxScrolls: { type: "number", description: "Max history pages to scroll back (default 40, ~50 msgs each)" },
       },
       additionalProperties: false,
     },
@@ -83,6 +84,20 @@ const tools = [
     },
   },
   {
+    name: "express_download_file",
+    description: "Download a document/file attachment: the app decrypts it and the file is saved to a local folder, then you can read it as a normal file (returns the path). Needs chatId + the message syncId (from read/open/thread output). Saves into ~/Downloads/express-reader by default; override with `folder` (relative = subfolder of ~/Downloads, absolute = used as-is) or the EXPRESS_DOWNLOAD_DIR env var. Max 25 MiB. SIDE EFFECT: opens the chat (marks read).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        chatId: { type: "string" },
+        syncId: { type: "string" },
+        folder: { type: "string", description: "Save folder; relative is placed under ~/Downloads, absolute is used directly" },
+      },
+      required: ["chatId", "syncId"],
+      additionalProperties: false,
+    },
+  },
+  {
     name: "express_close_debug",
     description: "Close the debug inspector port by gracefully quitting and relaunching eXpress. Call when finished reading, to stop exposing 127.0.0.1:9229.",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
@@ -102,6 +117,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
     else if (name === "express_list_threads") result = await x.listThreads({ chatId: a.chatId });
     else if (name === "express_read_thread") result = await x.readThread({ chatId: a.chatId, threadId: a.threadId, limit: a.limit ?? 200 });
     else if (name === "express_get_image") result = await x.getImagePreview({ chatId: a.chatId, syncId: a.syncId });
+    else if (name === "express_download_file") result = await x.downloadFile({ chatId: a.chatId, syncId: a.syncId, folder: a.folder });
     else if (name === "express_close_debug") result = await x.closeDebug();
     else if (name === "express_read_chat") {
       let chatId = a.chatId;
@@ -114,7 +130,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
         }
         chatId = people[0].id;
       }
-      result = await x.readChat({ chatId, sinceDays: a.sinceDays ?? 7, fromOpponentOnly: a.fromOpponentOnly ?? false, limit: a.limit ?? 200 });
+      result = await x.readChat({ chatId, sinceDays: a.sinceDays ?? 7, fromOpponentOnly: a.fromOpponentOnly ?? false, limit: a.limit ?? 200, maxScrolls: a.maxScrolls ?? 40 });
     } else throw new Error(`Unknown tool: ${name}`);
     return { content: [{ type: "text", text: JSON.stringify(result, null, 1) }] };
   } catch (err) {

@@ -87,29 +87,44 @@ const MSG_HELPERS = `
     from: m.sender === me ? 'me' : (nameOf(m.sender) || '?'), text: msgText(m) }; if (a) r.attachment = a; if (m.meta && m.meta.threadStarted) r.hasThread = true;
     if (m.payload && m.payload.reply) r.isReply = true; return r; };`;
 
-// Open a chat and read its recent messages (incl. attachment metadata). SIDE EFFECT: marks the chat read.
-export async function readChat({ chatId, sinceDays = 7, fromOpponentOnly = false, limit = 200 }) {
+// Open a chat and read its recent messages (incl. attachment metadata). Scrolls back to cover `sinceDays`
+// (beyond the ~1 week initial load) by paging the app's infinite-scroll. SIDE EFFECT: marks the chat read.
+export async function readChat({ chatId, sinceDays = 7, fromOpponentOnly = false, limit = 200, maxScrolls = 40 }) {
   await boot();
   const code = `(async () => {
     const S = window.__exr.store; const id = ${JSON.stringify(chatId)};
     const prev = S.getState().chatRouting?.activeChatId;
     S.dispatch({ type: '@@router/CALL_HISTORY_METHOD', payload: { method: 'push', args: ['/chats/' + id] } });
-    let st, ok = false;
-    for (let i = 0; i < 14; i++) { await new Promise(r => setTimeout(r, 500)); st = S.getState(); if (st.messages.length && st.messages[0].groupChatId === id) { ok = true; break; } }
-    st = S.getState();
+    let ok = false;
+    for (let i = 0; i < 14; i++) { await new Promise(r => setTimeout(r, 500)); const s = S.getState(); if (s.messages.length && s.messages[0].groupChatId === id) { ok = true; break; } }
+    const since = Date.now() - ${Number(sinceDays)} * ${DAY_MS};
+    const msgsOf = () => S.getState().messages.filter(m => m.groupChatId === id);
+    const oldestTs = () => { const t = msgsOf().map(m => m.insertedAt); return t.length ? Math.min(...t) : Date.now(); };
+    // Page older history by scrolling the virtualized message list to the top.
+    const findScroll = () => { const row = document.querySelector('.chat-message-row, [class*="chat-message-row"]'); let sc = row;
+      while (sc && sc !== document.body) { const st = getComputedStyle(sc); if ((st.overflowY === 'auto' || st.overflowY === 'scroll') && sc.scrollHeight > sc.clientHeight + 10) return sc; sc = sc.parentElement; } return null; };
+    let scrolls = 0, exhausted = false;
+    while (oldestTs() > since && scrolls < ${Number(maxScrolls)}) {
+      const sc = findScroll(); if (!sc) break;
+      const before = msgsOf().length;
+      sc.scrollTop = 0; sc.dispatchEvent(new Event('scroll', { bubbles: true })); sc.dispatchEvent(new WheelEvent('wheel', { deltaY: -3000, bubbles: true }));
+      await new Promise(r => setTimeout(r, 1500)); scrolls++;
+      if (msgsOf().length === before) { exhausted = true; break; }
+    }
+    const scEnd = findScroll(); if (scEnd) scEnd.scrollTop = scEnd.scrollHeight; // leave it scrolled to newest
+    const st = S.getState();
     ${MSG_HELPERS}
-    const me = st.user?.huid; const since = Date.now() - ${Number(sinceDays)} * ${DAY_MS};
-    const nameOf = h => st.profiles[h]?.rtsProfile?.name || null;
-    const all = st.messages.filter(m => m.groupChatId === id);
+    const me = st.user?.huid; const nameOf = h => st.profiles[h]?.rtsProfile?.name || null;
+    const all = msgsOf();
     let msgs = all.filter(m => m.eventType === 'message_new' && m.insertedAt >= since && !m.deletedAt);
     if (${!!fromOpponentOnly}) msgs = msgs.filter(m => m.sender !== me);
     msgs = msgs.sort((a, b) => a.insertedAt - b.insertedAt).slice(-${Number(limit)});
     const out = msgs.map(m => mapMsg(m, me, nameOf));
     const oldest = all.length ? Math.min(...all.map(m => m.insertedAt)) : null;
     if (prev && prev !== id) S.dispatch({ type: '@@router/CALL_HISTORY_METHOD', payload: { method: 'push', args: ['/chats/' + prev] } });
-    return { chat: st.chats.find(c => c.groupChatId === id)?.name, loaded: ok, count: out.length,
+    return { chat: st.chats.find(c => c.groupChatId === id)?.name, loaded: ok, count: out.length, scrolls, historyExhausted: exhausted,
       oldestLoaded: oldest ? new Date(oldest).toISOString().slice(0, 16) : null,
-      coversWholeRange: oldest ? oldest <= since : false, messages: out }; })()`;
+      coversWholeRange: oldest ? oldest <= since || exhausted : false, messages: out }; })()`;
   return evalRenderer(code);
 }
 
@@ -209,6 +224,65 @@ export async function getImagePreview({ chatId, syncId }) {
   const path = join(dir, `${syncId}.${ext}`);
   await writeFile(path, buf);
   return { found: true, path, mime: data.mime, fileName: data.fileName, width: data.width, height: data.height };
+}
+
+// Resolve the save directory: explicit `folder` wins, else $EXPRESS_DOWNLOAD_DIR, else ~/Downloads/express-reader.
+// A relative value is treated as a subfolder of ~/Downloads (never the Downloads root directly).
+async function resolveDownloadDir(folder) {
+  const { join, isAbsolute } = await import("node:path");
+  const { homedir } = await import("node:os");
+  const downloads = join(homedir(), "Downloads");
+  const choice = folder || process.env.EXPRESS_DOWNLOAD_DIR || "express-reader";
+  return isAbsolute(choice) ? choice : join(downloads, choice);
+}
+
+function safeBaseName(name) {
+  const base = String(name || "file").split(/[\\/]/).pop().replace(/\x00/g, "").trim();
+  return base && base !== "." && base !== ".." ? base.slice(0, 200) : "file";
+}
+
+// Download a document/file attachment: let the app decrypt it to an in-memory blob, fetch that blob,
+// and save it to the configurable folder. Keys never leave the app. SIDE EFFECT: opens the chat (marks read).
+export async function downloadFile({ chatId, syncId, folder }) {
+  await boot();
+  const code = `(async () => {
+    const S = window.__exr.store; const id = ${JSON.stringify(chatId)}; const sync = ${JSON.stringify(syncId)};
+    const prev = S.getState().chatRouting?.activeChatId;
+    S.dispatch({ type: '@@router/CALL_HISTORY_METHOD', payload: { method: 'push', args: ['/chats/' + id] } });
+    for (let i = 0; i < 14; i++) { await new Promise(r => setTimeout(r, 500)); if (S.getState().messages.some(m => m.groupChatId === id)) break; }
+    const restore = () => { if (prev && prev !== id) S.dispatch({ type: '@@router/CALL_HISTORY_METHOD', payload: { method: 'push', args: ['/chats/' + prev] } }); };
+    let st = S.getState();
+    let msg = st.messages.find(m => m.syncId === sync && m.payload && m.payload.payload && m.payload.payload.fileId);
+    if (!msg) { restore(); return { error: 'Message not found or has no file attachment in the loaded history.' }; }
+    const MAX = 25 * 1024 * 1024;
+    if (msg.payload.payload.fileSize > MAX) { restore(); return { error: 'File too large (> 25 MiB).' }; }
+    if (!msg.payload.payload.fileBlob) {
+      // Find any mounted component exposing the bound loadAttachment action.
+      const roots = [document.getElementById('root'), ...document.body.children].filter(Boolean);
+      let fiber = null; for (const el of roots) { const k = Object.keys(el).find(k => k.startsWith('__reactContainer') || k.startsWith('__reactFiber')); if (k) { fiber = el[k]; break; } }
+      while (fiber && fiber.return) fiber = fiber.return;
+      let la = null; { const stk = [fiber]; let n = 0; while (stk.length && n < 250000 && !la) { const f = stk.pop(); if (!f) continue; n++; const p = f.memoizedProps; if (p && typeof p.loadAttachment === 'function') la = p; if (f.child) stk.push(f.child); if (f.sibling) stk.push(f.sibling); } }
+      if (!la) { restore(); return { error: 'Download action unavailable (open the chat first).' }; }
+      try { la.loadAttachment({ message: msg }); } catch (e) { restore(); return { error: 'loadAttachment failed: ' + e.message }; }
+      for (let i = 0; i < 80; i++) { await new Promise(r => setTimeout(r, 500)); const m2 = S.getState().messages.find(m => m.syncId === sync); if (m2?.payload?.payload?.fileBlob) { msg = m2; break; } }
+    }
+    const f = msg.payload.payload;
+    if (!f.fileBlob) { restore(); return { error: 'Download did not complete in time.' }; }
+    const ab = await fetch(f.fileBlob).then(r => r.arrayBuffer());
+    let bin = ''; const u8 = new Uint8Array(ab); const CH = 0x8000;
+    for (let i = 0; i < u8.length; i += CH) bin += String.fromCharCode.apply(null, u8.subarray(i, i + CH));
+    restore();
+    return { fileName: f.fileName, mime: f.fileMimeType, size: f.fileSize, declared: ab.byteLength, base64: btoa(bin) }; })()`;
+  const data = await evalRenderer(code);
+  if (data?.error) return data;
+  const { writeFile, mkdir } = await import("node:fs/promises");
+  const { join } = await import("node:path");
+  const dir = await resolveDownloadDir(folder);
+  await mkdir(dir, { recursive: true });
+  const path = join(dir, safeBaseName(data.fileName));
+  const buf = Buffer.from(data.base64, "base64");
+  await writeFile(path, buf);
+  return { path, size: buf.length, mime: data.mime, sizeMatches: buf.length === data.size };
 }
 
 // Gracefully quit and relaunch the app to unbind the debug port (inspector.close() does not in Electron main).
