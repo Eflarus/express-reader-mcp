@@ -14,6 +14,15 @@ import { portOpen, evalRenderer } from "./cdp.js";
 const exec = promisify(execFile);
 const DAY_MS = 86_400_000;
 
+// Per-tool eval budgets. These MUST exceed the renderer-side wait loops inside each
+// tool, otherwise cdp.ts closes the socket while the app is still working (the old
+// single 25s wall killed attachment downloads that fetch+decrypt from the server).
+const DOWNLOAD_TIMEOUT_MS = 90_000; // open(≤7s) + loadAttachment poll(≤40s) + server fetch/decrypt + base64
+const SEARCH_TIMEOUT_MS = 45_000; // open(≤7s) + toggle retries + result poll(≤12s)
+const THREAD_TIMEOUT_MS = 45_000; // open(≤6s) + navigateToThread waits + reply poll(≤9s)
+const READ_BASE_TIMEOUT_MS = 20_000; // open + filtering + final scroll-to-bottom
+const SCROLL_PAGE_BUDGET_MS = 2_000; // per history page scrolled (inner sleep is 1.5s)
+
 // ---- Public result shapes ------------------------------------------------
 
 export interface Attachment {
@@ -315,7 +324,7 @@ export async function searchMessages(opts: SearchOptions): Promise<SearchResult 
     try { header.onToggleSearchChatHistory(false); } catch (e) {}
     restore();
     return { chat: st.chats.find(c => c.groupChatId === id)?.name ?? null, query: q, matched: matches.length, count: out.length, truncated: matches.length > out.length, messages: out }; })()`;
-  return evalRenderer<SearchResult | ErrorResult>(code);
+  return evalRenderer<SearchResult | ErrorResult>(code, SEARCH_TIMEOUT_MS);
 }
 
 // Open a chat and read its recent messages (incl. attachment metadata). Scrolls back to cover `sinceDays`
@@ -357,7 +366,8 @@ export async function readChat(opts: ReadChatOptions): Promise<ReadResult> {
     return { chat: st.chats.find(c => c.groupChatId === id)?.name ?? null, loaded: ok, count: out.length, scrolls, historyExhausted: exhausted,
       oldestLoaded: oldest ? new Date(oldest).toISOString().slice(0, 16) : null,
       coversWholeRange: oldest ? oldest <= since || exhausted : false, messages: out }; })()`;
-  return evalRenderer<ReadResult>(code);
+  // Budget scales with how many history pages we may scroll (each page sleeps ~1.5s).
+  return evalRenderer<ReadResult>(code, READ_BASE_TIMEOUT_MS + maxScrolls * SCROLL_PAGE_BUDGET_MS);
 }
 
 // Open a deep link (xlnk.ms/open/message?sync_id=&chat_id=) and return the target message + surrounding context.
@@ -428,7 +438,7 @@ export async function readThread(opts: ReadThreadOptions): Promise<ThreadResult 
     const out = tms.filter(m => m.eventType === 'message_new' && !m.deletedAt).sort((a, b) => a.insertedAt - b.insertedAt).slice(-${Number(limit)}).map(m => mapMsg(m, me, nameOf));
     if (prev) S.dispatch({ type: '@@router/CALL_HISTORY_METHOD', payload: { method: 'push', args: ['/chats/' + prev] } });
     return { chat: st.chats.find(c => c.groupChatId === chatId)?.name ?? null, threadId, count: out.length, messages: out }; })()`;
-  return evalRenderer<ThreadResult | ErrorResult>(code);
+  return evalRenderer<ThreadResult | ErrorResult>(code, THREAD_TIMEOUT_MS);
 }
 
 // Extract an image message's already-decrypted preview thumbnail (base64). SIDE EFFECT: opens the chat if not active.
@@ -506,7 +516,7 @@ export async function downloadFile(opts: DownloadOptions): Promise<DownloadResul
     for (let i = 0; i < u8.length; i += CH) bin += String.fromCharCode.apply(null, u8.subarray(i, i + CH));
     restore();
     return { fileName: f.fileName, mime: f.fileMimeType, size: f.fileSize, declared: ab.byteLength, base64: btoa(bin) }; })()`;
-  const data = await evalRenderer<DownloadBlob | ErrorResult>(code);
+  const data = await evalRenderer<DownloadBlob | ErrorResult>(code, DOWNLOAD_TIMEOUT_MS);
   if ("error" in data) return data;
   const dir = resolveDownloadDir(folder);
   await mkdir(dir, { recursive: true });

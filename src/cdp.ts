@@ -3,7 +3,10 @@
 // expression there that drives the renderer via webContents.executeJavaScript.
 
 const INSPECTOR_LIST = "http://127.0.0.1:9229/json/list";
-const EVAL_TIMEOUT_MS = 25_000;
+// Default hard wall for a single eval. Slow tools (attachment download, deep
+// history paging) pass a larger budget that matches their renderer-side loops;
+// see the per-tool timeouts in express.ts.
+const DEFAULT_EVAL_TIMEOUT_MS = 25_000;
 
 interface InspectorTarget {
   webSocketDebuggerUrl?: string;
@@ -27,7 +30,9 @@ export async function portOpen(): Promise<boolean> {
 }
 
 // Run `code` (a string of renderer-side JS) inside the eXpress window and return its value.
-export async function evalRenderer<T = unknown>(code: string): Promise<T> {
+// `timeoutMs` caps the whole round-trip; it must exceed the longest wait the injected
+// code can itself perform, or the socket is closed while the app is still working.
+export async function evalRenderer<T = unknown>(code: string, timeoutMs: number = DEFAULT_EVAL_TIMEOUT_MS): Promise<T> {
   const list = (await (await fetch(INSPECTOR_LIST)).json()) as InspectorTarget[];
   const target = list.find((t) => typeof t.webSocketDebuggerUrl === "string");
   if (!target?.webSocketDebuggerUrl) throw new Error("No inspector target (is the debug port open?)");
@@ -38,8 +43,8 @@ export async function evalRenderer<T = unknown>(code: string): Promise<T> {
   return await new Promise<T>((resolve, reject) => {
     const timer = setTimeout(() => {
       try { ws.close(); } catch { /* ignore */ }
-      reject(new Error("Inspector eval timed out"));
-    }, EVAL_TIMEOUT_MS);
+      reject(new Error(`Inspector eval timed out after ${String(timeoutMs)} ms`));
+    }, timeoutMs);
 
     ws.onopen = (): void => {
       ws.send(JSON.stringify({
