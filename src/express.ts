@@ -341,16 +341,28 @@ export async function readChat(opts: ReadChatOptions): Promise<ReadResult> {
     const since = Date.now() - ${Number(sinceDays)} * ${DAY_MS};
     const msgsOf = () => S.getState().messages.filter(m => m.groupChatId === id);
     const oldestTs = () => { const t = msgsOf().map(m => m.insertedAt); return t.length ? Math.min(...t) : Date.now(); };
-    // Page older history by scrolling the virtualized message list to the top.
-    const findScroll = () => { const row = document.querySelector('.chat-message-row, [class*="chat-message-row"]'); let sc = row;
-      while (sc && sc !== document.body) { const st = getComputedStyle(sc); if ((st.overflowY === 'auto' || st.overflowY === 'scroll') && sc.scrollHeight > sc.clientHeight + 10) return sc; sc = sc.parentElement; } return null; };
-    let scrolls = 0, exhausted = false;
+    // Page older history by scrolling the virtualized message list to the top. Prefer the
+    // app's own infinite-scroll container (reliable trigger); fall back to climbing from a
+    // message row only if it is not mounted yet.
+    const findScroll = () => {
+      const inf = document.querySelector('.infinite-scroll--chat');
+      if (inf && inf.scrollHeight > inf.clientHeight + 10) return inf;
+      const row = document.querySelector('.chat-message-row, [class*="chat-message-row"]'); let sc = row;
+      while (sc && sc !== document.body) { const st = getComputedStyle(sc); if ((st.overflowY === 'auto' || st.overflowY === 'scroll') && sc.scrollHeight > sc.clientHeight + 10) return sc; sc = sc.parentElement; }
+      return inf || null;
+    };
+    // A single page that does not grow can be a slow network fetch, not the end of history.
+    // Require several consecutive no-growth passes (with extra grace) before concluding it.
+    const STALE_LIMIT = 3;
+    let scrolls = 0, exhausted = false, stale = 0;
     while (oldestTs() > since && scrolls < ${Number(maxScrolls)}) {
-      const sc = findScroll(); if (!sc) break;
+      const sc = findScroll();
+      if (!sc) { await new Promise(r => setTimeout(r, 700)); if (++stale >= STALE_LIMIT) break; continue; }
       const before = msgsOf().length;
       sc.scrollTop = 0; sc.dispatchEvent(new Event('scroll', { bubbles: true })); sc.dispatchEvent(new WheelEvent('wheel', { deltaY: -3000, bubbles: true }));
       await new Promise(r => setTimeout(r, 1500)); scrolls++;
-      if (msgsOf().length === before) { exhausted = true; break; }
+      if (msgsOf().length > before) { stale = 0; }
+      else { await new Promise(r => setTimeout(r, 1200)); if (++stale >= STALE_LIMIT) { exhausted = true; break; } }
     }
     const scEnd = findScroll(); if (scEnd) scEnd.scrollTop = scEnd.scrollHeight; // leave it scrolled to newest
     const st = S.getState();
@@ -516,7 +528,10 @@ export async function downloadFile(opts: DownloadOptions): Promise<DownloadResul
     for (let i = 0; i < u8.length; i += CH) bin += String.fromCharCode.apply(null, u8.subarray(i, i + CH));
     restore();
     return { fileName: f.fileName, mime: f.fileMimeType, size: f.fileSize, declared: ab.byteLength, base64: btoa(bin) }; })()`;
-  const data = await evalRenderer<DownloadBlob | ErrorResult>(code, DOWNLOAD_TIMEOUT_MS);
+  const data = await evalRenderer<DownloadBlob | ErrorResult | null>(code, DOWNLOAD_TIMEOUT_MS);
+  // The renderer can resolve to undefined if the app navigated/reloaded mid-download;
+  // guard it so the caller gets a clean error instead of a thrown "in" on undefined.
+  if (data == null) return { error: "Download failed: the app returned no result (it may have reloaded during the download). Try again." };
   if ("error" in data) return data;
   const dir = resolveDownloadDir(folder);
   await mkdir(dir, { recursive: true });
