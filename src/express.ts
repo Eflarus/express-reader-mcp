@@ -17,7 +17,7 @@ const DAY_MS = 86_400_000;
 // Per-tool eval budgets. These MUST exceed the renderer-side wait loops inside each
 // tool, otherwise cdp.ts closes the socket while the app is still working (the old
 // single 25s wall killed attachment downloads that fetch+decrypt from the server).
-const DOWNLOAD_TIMEOUT_MS = 90_000; // open(≤7s) + loadAttachment poll(≤40s) + server fetch/decrypt + base64
+const DOWNLOAD_TIMEOUT_MS = 90_000; // open(≤7s) + loadMessageFile poll(≤40s) + server fetch/decrypt + base64
 const SEARCH_TIMEOUT_MS = 45_000; // open(≤7s) + toggle retries + result poll(≤12s)
 const THREAD_TIMEOUT_MS = 45_000; // open(≤6s) + navigateToThread waits + reply poll(≤9s)
 const READ_BASE_TIMEOUT_MS = 20_000; // open + filtering + final scroll-to-bottom
@@ -508,26 +508,42 @@ export async function downloadFile(opts: DownloadOptions): Promise<DownloadResul
     const restore = () => { if (prev && prev !== id) S.dispatch({ type: '@@router/CALL_HISTORY_METHOD', payload: { method: 'push', args: ['/chats/' + prev] } }); };
     let st = S.getState();
     let msg = st.messages.find(m => m.syncId === sync && m.payload && m.payload.payload && m.payload.payload.fileId);
-    if (!msg) { restore(); return { error: 'Message not found or has no file attachment in the loaded history.' }; }
+    if (!msg) { restore(); return { error: 'Message not in the loaded window (or it has no file attachment). Read/scroll the chat to it first, then retry.' }; }
     const MAX = 25 * 1024 * 1024;
-    if (msg.payload.payload.fileSize > MAX) { restore(); return { error: 'File too large (> 25 MiB).' }; }
+    // Validate the size as a real number: an absent/NaN fileSize must NOT bypass the cap
+    // (undefined > MAX is false), or a huge file would be pulled whole into a renderer blob + base64.
+    const sz = Number(msg.payload.payload.fileSize);
+    if (!Number.isFinite(sz) || sz <= 0) { restore(); return { error: 'Attachment has no known size (metadata not fully loaded) — refusing to download. Reopen the chat and retry.' }; }
+    if (sz > MAX) { restore(); return { error: 'File too large (> 25 MiB).' }; }
     if (!msg.payload.payload.fileBlob) {
-      // Find any mounted component exposing the bound loadAttachment action.
+      // Trigger the app's own file-download saga via the bound loadMessageFile action.
+      // It keys on payload.msgId (NOT syncId) and needs downloadToBlob:true to decrypt into
+      // an in-memory blob; without that flag the app saves to disk and never sets fileBlob.
+      // (loadAttachment/onLoadAttachment with the bare message are no-ops.)
+      const messageId = msg.payload.msgId;
+      if (!messageId) { restore(); return { error: 'Message has no payload.msgId; cannot trigger download.' }; }
+      const threadId = (msg.meta && msg.meta.threadId) || msg.payload.threadId || null;
       const roots = [document.getElementById('root'), ...document.body.children].filter(Boolean);
       let fiber = null; for (const el of roots) { const k = Object.keys(el).find(k => k.startsWith('__reactContainer') || k.startsWith('__reactFiber')); if (k) { fiber = el[k]; break; } }
       while (fiber && fiber.return) fiber = fiber.return;
-      let la = null; { const stk = [fiber]; let n = 0; while (stk.length && n < 250000 && !la) { const f = stk.pop(); if (!f) continue; n++; const p = f.memoizedProps; if (p && typeof p.loadAttachment === 'function') la = p; if (f.child) stk.push(f.child); if (f.sibling) stk.push(f.sibling); } }
-      if (!la) { restore(); return { error: 'Download action unavailable (open the chat first).' }; }
-      try { la.loadAttachment({ message: msg }); } catch (e) { restore(); return { error: 'loadAttachment failed: ' + e.message }; }
+      let lmf = null; { const stk = [fiber]; let n = 0; while (stk.length && n < 250000 && !lmf) { const f = stk.pop(); if (!f) continue; n++; const p = f.memoizedProps; if (p && typeof p.loadMessageFile === 'function') lmf = p.loadMessageFile; if (f.child) stk.push(f.child); if (f.sibling) stk.push(f.sibling); } }
+      if (!lmf) { restore(); return { error: 'Download action unavailable (open the chat first).' }; }
+      try { lmf({ messageId, downloadToBlob: true, threadId }); } catch (e) { restore(); return { error: 'loadMessageFile failed: ' + e.message }; }
       for (let i = 0; i < 80; i++) { await new Promise(r => setTimeout(r, 500)); const m2 = S.getState().messages.find(m => m.syncId === sync); if (m2?.payload?.payload?.fileBlob) { msg = m2; break; } }
     }
     const f = msg.payload.payload;
-    if (!f.fileBlob) { restore(); return { error: 'Download did not complete in time.' }; }
-    const ab = await fetch(f.fileBlob).then(r => r.arrayBuffer());
-    let bin = ''; const u8 = new Uint8Array(ab); const CH = 0x8000;
-    for (let i = 0; i < u8.length; i += CH) bin += String.fromCharCode.apply(null, u8.subarray(i, i + CH));
+    if (!f.fileBlob) { restore(); return { error: 'Download did not complete in time — the attachment did not decrypt within the budget (slow server fetch, or this attachment type is not handled by the trigger).' }; }
+    // Fetch the already-decrypted blob. Guard it so a revoked/dead blob restores the user's view
+    // and fails fast (its own 30s timeout) instead of silently consuming the whole eval budget.
+    let out;
+    try {
+      const ab = await fetch(f.fileBlob, { signal: AbortSignal.timeout(30000) }).then(r => r.arrayBuffer());
+      let bin = ''; const u8 = new Uint8Array(ab); const CH = 0x8000;
+      for (let i = 0; i < u8.length; i += CH) bin += String.fromCharCode.apply(null, u8.subarray(i, i + CH));
+      out = { fileName: f.fileName, mime: f.fileMimeType, size: f.fileSize, declared: ab.byteLength, base64: btoa(bin) };
+    } catch (e) { restore(); return { error: 'Reading the decrypted file failed: ' + (e && e.message ? e.message : String(e)) }; }
     restore();
-    return { fileName: f.fileName, mime: f.fileMimeType, size: f.fileSize, declared: ab.byteLength, base64: btoa(bin) }; })()`;
+    return out; })()`;
   const data = await evalRenderer<DownloadBlob | ErrorResult | null>(code, DOWNLOAD_TIMEOUT_MS);
   // The renderer can resolve to undefined if the app navigated/reloaded mid-download;
   // guard it so the caller gets a clean error instead of a thrown "in" on undefined.

@@ -44,11 +44,13 @@ claude mcp add --scope user express-reader -- "$(which node)" "$PWD/dist/server.
 
 ## How downloads stay safe
 
-`express_download_file` never touches your encryption keys. It calls the app's own `loadAttachment`, which decrypts the file in-app to an in-memory blob; the tool only fetches that already-decrypted blob (the same way it reads a decrypted message) and writes it to disk. The key material stays inside the app at all times.
+`express_download_file` never touches your encryption keys. It calls the app's own `loadMessageFile` action (with `downloadToBlob`), which decrypts the file in-app to an in-memory blob; the tool only fetches that already-decrypted blob (the same way it reads a decrypted message) and writes it to disk. The key material stays inside the app at all times.
 
 ## Limits / notes
 
 - Reading a non-open chat still **marks it read** (the reliable path opens the chat); fully silent reading is not wired.
 - History paging walks the app's virtualized scroll; very long ranges take a few seconds per ~50-message page (`maxScrolls` caps it).
-- Downloads cap at 25 MiB.
+- Download needs the target message in the loaded window first — read/scroll the chat to it, then download by `syncId`.
+- Downloads cap at 25 MiB; an attachment with no known size is refused rather than pulled whole into memory.
+- Downloading an attachment posted inside a **thread** is untested (the thread-id path is unverified); main-chat attachments are verified.
 - Tied to the app's internal store/route shapes (observed on app v3.73.51); an app update may require adjustment.
